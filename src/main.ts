@@ -1,24 +1,133 @@
-import express, { type Request, type Response, type Application } from "express";
-import { zodMiddleware } from "$/middleware/zod.middleware";
+import express, { type Application } from "express";
+import { type Socket, type ServerOptions } from "socket.io";
+import { type Online } from "./types";
+import * as http from "http";
+// import { CorsOptions } from "cors";
+// import { Server} from "socket.io";
 import cors from "cors";
-import { z } from "zod";
-import { corsOptions } from "./config/corsOption";
-
+import { Server as SocketIOServer } from "socket.io";
 const app: Application = express();
-const PORT: number = 3000;
 
-app.use(cors(corsOptions));
-app.use(express.urlencoded({ extended: false }));
+// const http = require("http");
+// const cors = require("cors");
+// const { Server } = require("socket.io");
+const PORT = process.env.PORT || 5001;
+app.use(cors());
+const server = http.createServer(app);
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-app.get("/", (req: Request, res: Response) => {
-  const bodySchema = z.object({ name: z.string().trim().toUpperCase().min(3).max(255) });
-  const result = bodySchema.parse(req.body);
-  res.status(200).json({ message: "Hello world", body: result });
+const ioOptions: Partial<ServerOptions> = {
+  cors: {
+    origin: "http://localhost:3000",
+    methods: ["GET", "POST"],
+  },
+};
+
+const io: SocketIOServer = new SocketIOServer(server, ioOptions);
+
+app.get("/", (req, res) => res.send("Hello World!"));
+
+let online_Users: Online[] = [];
+
+type Data = {
+  receiverEmail: string;
+  senderEmail: string;
+  chatId: number;
+  message: string;
+  image: string[];
+  status: "sent" | "read" | "delivered";
+};
+
+type Seen = {
+  receiverEmail: string;
+  senderEmail: string;
+};
+
+io.on("connection", (socket: Socket) => {
+  socket.on("new-online", (newEmail: string) => {
+    if (!online_Users.some((user) => user.email === newEmail)) {
+      online_Users.push({ email: newEmail, socketId: socket.id, socket: socket, typing: false });
+      io.emit(
+        "get-users",
+        online_Users.map((i) => ({ email: i.email, socketId: i.socketId }))
+      );
+    }
+  });
+
+  socket.on("typing", (email: string) => {
+    io.emit(
+      "get-users",
+      online_Users.map((i) => {
+        if (i.email === email) {
+          return { email: i.email, sockedId: i.socketId, typing: true };
+        } else {
+          return { email: i.email, sockedId: i.socketId };
+        }
+      })
+    );
+  });
+
+  socket.on("all-is-seen", ({ receiver }) => {
+    io.emit("seen", receiver);
+  });
+  socket.on("reciever-seen", ({ receiverEmail, senderEmail }: Seen) => {
+    io.emit("now-seen-all", {
+      receiverEmail,
+      senderEmails:senderEmail,
+    });
+  });
+
+  socket.on("stop-typing", (email: string) => {
+    io.emit(
+      "get-users",
+      online_Users.map((i) => {
+        if (i.email === email) {
+          return { email: i.email, sockedId: i.socketId, typing: false };
+        } else {
+          return { email: i.email, sockedId: i.socketId };
+        }
+      })
+    );
+  });
+
+  socket.on("get-users", (email: string) => {
+    const getWhoJusJoinedEmail = online_Users.find((i) => i.email === email);
+    getWhoJusJoinedEmail?.socket?.emit(
+      "get-users",
+      online_Users.map((i) => ({ email: i.email, socketId: i.socketId }))
+    );
+  });
+
+  socket.on("sentMessage", (data: Data) => {
+    data.status = "delivered";
+    if (online_Users.some((i) => i.email === data.receiverEmail)) {
+      const getSenderEmail = online_Users.find((i) => i.email === data.senderEmail);
+      getSenderEmail?.socket?.emit("sentMessageFromServer", {
+        data,
+      });
+      const getRecieverEmail = online_Users.find((i) => i.email === data.receiverEmail);
+      getRecieverEmail?.socket?.emit("sentMessageFromServer", {
+        data,
+      });
+    }
+    io.emit(
+      "get-users",
+      online_Users.map((i) => ({ email: i.email, socketId: i.socketId }))
+    );
+  });
+
+  socket.on("disconnect", () => {
+    io.emit(
+      "get-users",
+      online_Users
+        .filter((i) => i.socketId !== socket.id)
+        .map((j) => ({ email: j.email, socketId: j.socketId }))
+    );
+    online_Users = online_Users.filter((i) => i.socketId !== socket.id);
+  });
 });
 
-app.use(zodMiddleware);
-
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Server up at PORT:${PORT}`);
 });
